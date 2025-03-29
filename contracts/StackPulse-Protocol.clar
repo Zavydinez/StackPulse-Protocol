@@ -1,4 +1,4 @@
-;; Enhanced BitStack Analytics Contract
+;; StacksPulse-Protocol
 ;; Advanced DeFi analytics with multi-tier staking, governance, and emergency features
 
 ;; Constants
