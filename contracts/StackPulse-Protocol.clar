@@ -174,3 +174,155 @@
     )
 )
 
+
+;; Get tier info based on stake amount
+(define-private (get-tier-info (stake-amount uint))
+    (if (>= stake-amount u10000000)
+        {tier-level: u3, reward-multiplier: u200}
+        (if (>= stake-amount u5000000)
+            {tier-level: u2, reward-multiplier: u150}
+            {tier-level: u1, reward-multiplier: u100}
+        )
+    )
+)
+
+;; Helper Functions
+
+;; Calculate lock period multiplier
+(define-private (calculate-lock-multiplier (lock-period uint))
+    (if (>= lock-period u8640)     ;; 2 months
+        u150                       ;; 1.5x multiplier
+        (if (>= lock-period u4320) ;; 1 month
+            u125                   ;; 1.25x multiplier
+            u100                   ;; 1x multiplier (no lock)
+        )
+    )
+)
+
+
+;; Initiate unstaking with cooldown
+(define-public (initiate-unstake (amount uint))
+    (let
+        (
+            (staking-position (unwrap! (map-get? StakingPositions tx-sender) ERR-NO-STAKE))
+            (current-amount (get amount staking-position))
+        )
+        (asserts! (>= current-amount amount) ERR-INSUFFICIENT-STX)
+        (asserts! (is-none (get cooldown-start staking-position)) ERR-COOLDOWN-ACTIVE)
+
+        ;; Update staking position with cooldown
+        (map-set StakingPositions
+            tx-sender
+            (merge staking-position
+                {
+                    cooldown-start: (some block-height)
+                }
+            )
+        )
+        (ok true)
+    )
+)
+
+;; Complete unstaking after cooldown
+(define-public (complete-unstake)
+    (let
+        (
+            (staking-position (unwrap! (map-get? StakingPositions tx-sender) ERR-NO-STAKE))
+            (cooldown-start (unwrap! (get cooldown-start staking-position) ERR-NOT-AUTHORIZED))
+        )
+        (asserts! (>= (- block-height cooldown-start) (var-get cooldown-period)) ERR-COOLDOWN-ACTIVE)
+
+        ;; Transfer STX back to user
+        (try! (as-contract (stx-transfer? (get amount staking-position) tx-sender tx-sender)))
+
+        ;; Clear staking position
+        (map-delete StakingPositions tx-sender)
+
+        (ok true)
+    )
+)
+
+;; Enhanced reward calculation with multipliers
+(define-private (calculate-rewards (user principal) (blocks uint))
+    (let
+        (
+            (staking-position (unwrap! (map-get? StakingPositions user) u0))
+            (user-position (unwrap! (map-get? UserPositions user) u0))
+            (stake-amount (get amount staking-position))
+            (base-rate (var-get base-reward-rate))
+            (multiplier (get rewards-multiplier user-position))
+        )
+        (/ (* (* (* stake-amount base-rate) multiplier) blocks) u14400000)
+    )
+)
+
+;; Governance Functions
+
+;; Create new proposal
+(define-public (create-proposal (description (string-utf8 256)) (voting-period uint))
+    (let
+        (
+            (user-position (unwrap! (map-get? UserPositions tx-sender) ERR-NOT-AUTHORIZED))
+            (proposal-id (+ (var-get proposal-count) u1))
+        )
+        (asserts! (>= (get voting-power user-position) u1000000) ERR-NOT-AUTHORIZED)
+
+        (map-set Proposals proposal-id
+            {
+                creator: tx-sender,
+                description: description,
+                start-block: block-height,
+                end-block: (+ block-height voting-period),
+                executed: false,
+                votes-for: u0,
+                votes-against: u0,
+                minimum-votes: u1000000
+            }
+        )
+
+        (var-set proposal-count proposal-id)
+        (ok proposal-id)
+    )
+)
+
+;; Vote on proposal
+(define-public (vote-on-proposal (proposal-id uint) (vote-for bool))
+    (let
+        (
+            (proposal (unwrap! (map-get? Proposals proposal-id) ERR-INVALID-PROTOCOL))
+            (user-position (unwrap! (map-get? UserPositions tx-sender) ERR-NOT-AUTHORIZED))
+            (voting-power (get voting-power user-position))
+        )
+        (asserts! (< block-height (get end-block proposal)) ERR-NOT-AUTHORIZED)
+
+        (map-set Proposals proposal-id
+            (merge proposal
+                {
+                    votes-for: (if vote-for (+ (get votes-for proposal) voting-power) (get votes-for proposal)),
+                    votes-against: (if vote-for (get votes-against proposal) (+ (get votes-against proposal) voting-power))
+                }
+            )
+        )
+        (ok true)
+    )
+)
+
+;; Emergency Functions
+
+;; Pause contract
+(define-public (pause-contract)
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) ERR-NOT-AUTHORIZED)
+        (var-set contract-paused true)
+        (ok true)
+    )
+)
+
+;; Resume contract
+(define-public (resume-contract)
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) ERR-NOT-AUTHORIZED)
+        (var-set contract-paused false)
+        (ok true)
+    )
+)
